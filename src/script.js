@@ -192,12 +192,51 @@ function handleAILaunchClick(link) {
     }
 }
 
-// View full prompt in modal with interactive placeholder filler & 1-click AI launch
+// Persist common teacher placeholder values (e.g. Subject, Grade Level) across prompts
+const FILLER_STORAGE_KEY = 'my_educator_prompt_defaults_v1';
+const MY_CLASS_PRESETS = [
+    { label: 'KSSR Tahun 4 · Sains', subject: 'Sains', grade: '4', level: 'Tahun 4 (KSSR)', topic: 'Fotosintesis' },
+    { label: 'KSSM Form 3 · Maths', subject: 'Mathematics', grade: '3', level: 'Form 3 (KSSM)', topic: 'Linear Equations' },
+    { label: 'SPM · Bahasa Melayu', subject: 'Bahasa Melayu', grade: '5', level: 'Tingkatan 5 (SPM)', topic: 'Karangan Berformat' }
+];
+
+function loadSavedPlaceholderDefaults() {
+    try {
+        return JSON.parse(localStorage.getItem(FILLER_STORAGE_KEY) || '{}') || {};
+    } catch (_err) {
+        return {};
+    }
+}
+
+function savePlaceholderDefault(key, value) {
+    try {
+        const saved = loadSavedPlaceholderDefaults();
+        if (value && value.trim()) {
+            saved[key.toLowerCase()] = value.trim();
+        } else {
+            delete saved[key.toLowerCase()];
+        }
+        localStorage.setItem(FILLER_STORAGE_KEY, JSON.stringify(saved));
+    } catch (_err) {
+        // ignore storage errors in private browsing
+    }
+}
+
+function matchPresetValue(key, preset) {
+    const k = key.toLowerCase();
+    if (k.includes('subject') || k.includes('mata pelajaran')) return preset.subject;
+    if (k === '1-5' || k.includes('grade') || k.includes('year') || k.includes('form') || k.includes('level') || k.includes('tingkatan') || k.includes('tahun')) return preset.level;
+    if (k.includes('topic') || k.includes('tajuk')) return preset.topic;
+    return null;
+}
+
+// View full prompt in modal with interactive placeholder filler, presets & 1-click AI launch
 function viewFullPrompt(button) {
     const card = button.closest('.prompt-card');
     const fullPrompt = card.getAttribute('data-full-prompt') || '';
     const title = card.querySelector('.prompt-title').textContent;
     const placeholders = extractPromptPlaceholders(fullPrompt);
+    const savedDefaults = loadSavedPlaceholderDefaults();
     const values = {};
 
     // Create modal
@@ -209,8 +248,15 @@ function viewFullPrompt(button) {
     const fillerMarkup = placeholders.length ? `
         <div class="modal-filler">
             <div class="modal-filler-head">
-                <strong><i class="fas fa-sliders-h"></i> Customize Placeholders (${placeholders.length})</strong>
-                <span class="modal-filler-hint">Fill in your class details to update the prompt live</span>
+                <div class="modal-filler-title-group">
+                    <strong><i class="fas fa-sliders-h"></i> Customize Placeholders</strong>
+                    <span class="modal-filler-progress">0 / ${placeholders.length} filled</span>
+                </div>
+                <div class="modal-filler-presets">
+                    <span class="modal-filler-hint">Quick fill:</span>
+                    ${MY_CLASS_PRESETS.map((p, idx) => `<button class="preset-chip" type="button" data-preset-idx="${idx}">${escapeHtml(p.label)}</button>`).join('')}
+                    <button class="preset-chip preset-clear" type="button" data-preset-clear="true">Clear</button>
+                </div>
             </div>
             <div class="modal-filler-grid"></div>
         </div>
@@ -250,7 +296,22 @@ function viewFullPrompt(button) {
     if (placeholders.length) {
         const grid = modal.querySelector('.modal-filler-grid');
         const promptEl = modal.querySelector('.modal-prompt');
-        placeholders.forEach((key) => {
+        const progressEl = modal.querySelector('.modal-filler-progress');
+        const inputs = [];
+
+        const syncFillerState = () => {
+            const filled = buildFilledPrompt(fullPrompt, values);
+            promptEl.textContent = filled;
+            updateAILaunchLinks(modal, filled);
+            const filledCount = placeholders.filter((k) => values[k] && values[k].trim()).length;
+            if (progressEl) {
+                const allDone = filledCount === placeholders.length;
+                progressEl.textContent = allDone ? `✓ Ready (${filledCount}/${placeholders.length})` : `${filledCount} / ${placeholders.length} filled`;
+                progressEl.classList.toggle('is-ready', allDone);
+            }
+        };
+
+        placeholders.forEach((key, index) => {
             const field = document.createElement('label');
             field.className = 'modal-filler-field';
 
@@ -260,17 +321,61 @@ function viewFullPrompt(button) {
             const input = document.createElement('input');
             input.type = 'text';
             input.placeholder = `[${key}]`;
+            const remembered = savedDefaults[key.toLowerCase()];
+            if (remembered) {
+                input.value = remembered;
+                values[key] = remembered;
+            }
+
             input.addEventListener('input', () => {
                 values[key] = input.value;
-                const filled = buildFilledPrompt(fullPrompt, values);
-                promptEl.textContent = filled;
-                updateAILaunchLinks(modal, filled);
+                savePlaceholderDefault(key, input.value);
+                syncFillerState();
             });
 
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && inputs[index + 1]) {
+                    e.preventDefault();
+                    inputs[index + 1].focus();
+                }
+            });
+
+            inputs.push(input);
             field.appendChild(labelText);
             field.appendChild(input);
             grid.appendChild(field);
         });
+
+        modal.querySelectorAll('[data-preset-idx]').forEach((chip) => {
+            chip.addEventListener('click', () => {
+                const preset = MY_CLASS_PRESETS[Number(chip.getAttribute('data-preset-idx'))];
+                if (!preset) return;
+                placeholders.forEach((key, i) => {
+                    const matched = matchPresetValue(key, preset);
+                    if (matched !== null) {
+                        inputs[i].value = matched;
+                        values[key] = matched;
+                        savePlaceholderDefault(key, matched);
+                    }
+                });
+                syncFillerState();
+            });
+        });
+
+        const clearBtn = modal.querySelector('[data-preset-clear]');
+        if (clearBtn) {
+            clearBtn.addEventListener('click', () => {
+                placeholders.forEach((key, i) => {
+                    inputs[i].value = '';
+                    values[key] = '';
+                    savePlaceholderDefault(key, '');
+                });
+                syncFillerState();
+                if (inputs[0]) inputs[0].focus();
+            });
+        }
+
+        syncFillerState();
     }
 
     const onKeyDown = (e) => {
@@ -572,6 +677,57 @@ const modalStyles = `
 .modal-filler-hint {
     font-size: 0.8rem;
     color: #475569;
+}
+
+.modal-filler-title-group,
+.modal-filler-presets {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+}
+
+.modal-filler-progress {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+.modal-filler-progress.is-ready {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.preset-chip {
+    background: #ffffff;
+    color: #1e3a8a;
+    border: 1px solid #93c5fd;
+    border-radius: 999px;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.preset-chip:hover {
+    background: #dbeafe;
+    border-color: #2563eb;
+}
+
+.preset-clear {
+    color: #64748b;
+    border-color: #cbd5e1;
+}
+
+.preset-clear:hover {
+    background: #fee2e2;
+    border-color: #ef4444;
+    color: #b91c1c;
 }
 
 .modal-filler-grid {
